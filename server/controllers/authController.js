@@ -1,0 +1,616 @@
+const bcrypt = require('bcryptjs');
+const pool = require('../db/db');
+const {
+  generateAccessToken,
+  generateRefreshToken,
+  hashToken,
+  getRefreshTokenExpiry,
+  getAccessTokenExpiresInSeconds,
+} = require('../utils/tokenUtils');
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Shape the public user object returned to clients (never expose password_hash).
+function publicUser(u) {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    district: u.district,
+    is_approved: u.is_approved,
+    profile_picture: u.profile_picture,
+    phone: u.phone,
+    profile_photo: u.profile_photo,
+    preferred_language: u.preferred_language || 'en',
+    designation: u.designation,
+    province: u.province,
+    gov_service_id: u.gov_service_id,
+    created_at: u.created_at,
+  };
+}
+
+async function register(req, res) {
+  const { name, email, password, district, phone } = req.body;
+  let { role } = req.body;
+  // Officer-only certification fields (sent as multipart form fields).
+  const { designation, province } = req.body;
+
+  // Validation
+  const errors = [];
+  if (!name || !name.trim()) errors.push('Name is required');
+  if (!email || !EMAIL_RE.test(email)) errors.push('A valid email is required');
+  if (!password || password.length < 8) errors.push('Password must be at least 8 characters');
+  if (!district || !district.trim()) errors.push('District is required');
+
+  const phoneRegex = /^(\+94|0)[0-9]{9}$/;
+  if (!phone || !phone.trim()) {
+    errors.push('Phone number is required');
+  } else if (!phoneRegex.test(phone.trim().replace(/\s/g, ''))) {
+    errors.push('Invalid phone number. Use format: 0771234567 or +94771234567');
+  }
+
+  // Only farmer/officer may self-register; default to farmer.
+  if (role === undefined || role === null || role === '') role = 'farmer';
+  if (role !== 'farmer' && role !== 'officer') {
+    errors.push("Role must be 'farmer' or 'officer'");
+  }
+
+  // Officers must supply certification details and an uploaded document.
+  if (role === 'officer') {
+    if (!designation || !designation.trim()) errors.push('Designation is required');
+    if (!province || !province.trim()) errors.push('Province is required');
+    if (!req.file) errors.push('Certification document is required for officer registration');
+  }
+
+  if (errors.length) {
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  // Officers require admin approval; farmers are approved immediately.
+  const isApproved = role === 'officer' ? 0 : 1;
+  const certPath = role === 'officer' && req.file ? req.file.filename : null;
+  const officerDesignation = role === 'officer' ? designation.trim() : null;
+  const officerProvince = role === 'officer' ? province.trim() : null;
+  const formattedPhone = phone ? phone.trim().replace(/\s/g, '') : null;
+
+  try {
+    const existing = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (existing[0].length > 0) {
+      return res.status(409).json({ message: 'Email already registered' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      `INSERT INTO users
+         (name, email, password_hash, role, district, phone, is_approved,
+          designation, province, cert_document_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        name.trim(),
+        email,
+        passwordHash,
+        role,
+        district.trim(),
+        formattedPhone,
+        isApproved,
+        officerDesignation,
+        officerProvince,
+        certPath,
+      ]
+    );
+
+    // Notify every admin that a new officer is awaiting verification.
+    if (role === 'officer') {
+      const [admins] = await pool.query("SELECT id FROM users WHERE role = 'admin'");
+      if (admins.length) {
+        const message = `New agricultural officer registration pending approval: ${name.trim()} (${officerDesignation}) from ${officerProvince} province.`;
+        const values = admins.map((a) => [a.id, 'new_officer_pending', message, result.insertId]);
+        await pool.query(
+          'INSERT INTO notifications (user_id, type, message, related_id) VALUES ?',
+          [values]
+        );
+      }
+    }
+
+    const user = {
+      id: result.insertId,
+      name: name.trim(),
+      email,
+      role,
+      district: district.trim(),
+      is_approved: isApproved,
+      profile_picture: null,
+    };
+
+    // Auto-login: generate access + refresh tokens so the client is immediately
+    // authenticated after registration (officer tokens still work, but officer
+    // routes will block until is_approved = 1).
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken();
+    const tokenHash = hashToken(refreshToken);
+    const expiresAt = getRefreshTokenExpiry();
+    const deviceInfo = req.headers['user-agent']
+      ? req.headers['user-agent'].substring(0, 255)
+      : 'Unknown';
+
+    await pool.query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, device_info)
+       VALUES (?, ?, ?, ?)`,
+      [user.id, tokenHash, expiresAt, deviceInfo]
+    );
+
+    return res.status(201).json({
+      message:
+        role === 'officer'
+          ? 'Registration successful. Your officer account is pending admin approval.'
+          : 'Registration successful',
+      accessToken,
+      refreshToken,
+      token: accessToken,
+      expiresIn: getAccessTokenExpiresInSeconds(),
+      user: publicUser(user),
+    });
+  } catch (err) {
+    console.error('register error:', err.message);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
+async function login(req, res) {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+
+  try {
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    const user = rows[0];
+
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Deactivated accounts cannot log in, regardless of role.
+    if (user.is_active === 0) {
+      return res.status(403).json({
+        message: `Your account has been deactivated. Reason: ${
+          user.deactivation_reason || 'Please contact the administrator for details.'
+        }`,
+      });
+    }
+
+    if (user.role === 'officer' && user.is_approved === 2) {
+      return res.status(403).json({
+        message: `Your officer registration was rejected. Reason: ${
+          user.rejection_reason || 'Please contact the administrator for details.'
+        }`,
+      });
+    }
+    if (user.role === 'officer' && user.is_approved === 0) {
+      return res.status(403).json({ message: 'Your account is pending admin approval.' });
+    }
+
+    // Generate access + refresh tokens.
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken();
+    const tokenHash = hashToken(refreshToken);
+    const expiresAt = getRefreshTokenExpiry();
+
+    // Capture device info for security tracking.
+    const deviceInfo = req.headers['user-agent']
+      ? req.headers['user-agent'].substring(0, 255)
+      : 'Unknown';
+
+    // Persist hashed refresh token — never store the raw token.
+    await pool.query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, device_info)
+       VALUES (?, ?, ?, ?)`,
+      [user.id, tokenHash, expiresAt, deviceInfo]
+    );
+
+    return res.json({
+      accessToken,
+      refreshToken,
+      token: accessToken,
+      expiresIn: getAccessTokenExpiresInSeconds(), // 15 minutes in seconds
+      user: publicUser(user),
+    });
+  } catch (err) {
+    console.error('login error:', err.message);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
+// Returns the authenticated user's data with fresh fields from the database.
+async function getMe(req, res) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, email, role, district, is_approved,
+              phone, profile_photo, preferred_language,
+              designation, province, gov_service_id, created_at
+       FROM users WHERE id = ?`,
+      [req.user.id]
+    );
+    if (rows.length) {
+      return res.json({ user: rows[0] });
+    }
+    return res.json({ user: req.user });
+  } catch {
+    return res.json({ user: req.user });
+  }
+}
+
+// PUT /api/auth/profile — update profile fields according to user role and credentials.
+const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Build update object based on what was submitted
+    const updates = {};
+
+    // Fields ALL roles can update
+    if (req.body.name !== undefined) {
+      if (!req.body.name || req.body.name.trim().length < 2) {
+        return res.status(400).json({ message: 'Name must be at least 2 characters' });
+      }
+      updates.name = req.body.name.trim();
+    }
+
+    if (req.body.phone !== undefined) {
+      // Validate Sri Lankan phone number format
+      const phoneRegex = /^(\+94|0)[0-9]{9}$/;
+      if (req.body.phone && !phoneRegex.test(req.body.phone.replace(/\s/g, ''))) {
+        return res.status(400).json({
+          message: 'Invalid phone number. Use format: 0771234567 or +94771234567'
+        });
+      }
+      updates.phone = req.body.phone ? req.body.phone.trim() : null;
+    }
+
+    if (req.body.preferred_language !== undefined) {
+      if (!['en', 'si'].includes(req.body.preferred_language)) {
+        return res.status(400).json({ message: 'Language must be en or si' });
+      }
+      updates.preferred_language = req.body.preferred_language;
+    }
+
+    // Profile photo upload
+    if (req.file) {
+      updates.profile_photo = req.file.filename;
+    }
+
+    // FARMER-specific fields
+    if (userRole === 'farmer') {
+      if (req.body.district !== undefined) {
+        if (!req.body.district) {
+          return res.status(400).json({ message: 'District is required' });
+        }
+        updates.district = req.body.district;
+      }
+    }
+
+    // OFFICER-specific fields
+    if (userRole === 'officer') {
+      if (req.body.district !== undefined) {
+        updates.district = req.body.district;
+      }
+      if (req.body.designation !== undefined) {
+        updates.designation = req.body.designation;
+      }
+      if (req.body.province !== undefined) {
+        updates.province = req.body.province;
+      }
+    }
+
+    // ADMIN-specific fields
+    if (userRole === 'admin') {
+      // Admin can change email — requires current password verification
+      if (req.body.email !== undefined) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(req.body.email)) {
+          return res.status(400).json({ message: 'Invalid email address' });
+        }
+        // Check email not already taken by another user
+        const [existing] = await pool.query(
+          'SELECT id FROM users WHERE email = ? AND id != ?',
+          [req.body.email, userId]
+        );
+        if (existing.length > 0) {
+          return res.status(409).json({ message: 'Email already in use by another account' });
+        }
+        // Require current password to change email
+        if (!req.body.current_password) {
+          return res.status(400).json({
+            message: 'Current password required to change email'
+          });
+        }
+        const [users] = await pool.query(
+          'SELECT password_hash FROM users WHERE id = ?', [userId]
+        );
+        const valid = await bcrypt.compare(req.body.current_password, users[0].password_hash);
+        if (!valid) {
+          return res.status(401).json({ message: 'Current password is incorrect' });
+        }
+        updates.email = req.body.email.toLowerCase().trim();
+      }
+    }
+
+    // PASSWORD CHANGE — available to ALL roles
+    if (req.body.new_password !== undefined) {
+      // Require current password
+      if (!req.body.current_password) {
+        return res.status(400).json({
+          message: 'Current password required to set a new password'
+        });
+      }
+
+      // Validate new password
+      if (req.body.new_password.length < 8) {
+        return res.status(400).json({
+          message: 'New password must be at least 8 characters'
+        });
+      }
+
+      if (req.body.new_password !== req.body.confirm_password) {
+        return res.status(400).json({
+          message: 'New password and confirm password do not match'
+        });
+      }
+
+      // Verify current password
+      const [users] = await pool.query(
+        'SELECT password_hash FROM users WHERE id = ?', [userId]
+      );
+      const validPassword = await bcrypt.compare(
+        req.body.current_password, users[0].password_hash
+      );
+      if (!validPassword) {
+        return res.status(401).json({ message: 'Current password is incorrect' });
+      }
+
+      // Hash new password
+      updates.password_hash = await bcrypt.hash(req.body.new_password, 10);
+    }
+
+    // If nothing to update
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid fields provided to update' });
+    }
+
+    // Build dynamic SQL update
+    const setClauses = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+    const values = [...Object.values(updates), userId];
+
+    await pool.query(
+      `UPDATE users SET ${setClauses} WHERE id = ?`,
+      values
+    );
+
+    // Return updated user data (without password)
+    const [updatedUser] = await pool.query(
+      `SELECT id, name, email, role, district, is_approved,
+              phone, profile_photo, preferred_language,
+              designation, province, gov_service_id, created_at
+       FROM users WHERE id = ?`,
+      [userId]
+    );
+
+    const token = generateAccessToken(updatedUser[0]);
+
+    return res.json({
+      message: 'Profile updated successfully',
+      user: updatedUser[0],
+      token
+    });
+
+  } catch (error) {
+    console.error('Update profile error:', error);
+    return res.status(500).json({ message: 'Failed to update profile' });
+  }
+};
+
+async function updateProfilePicture(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ message: 'No image provided' });
+  }
+
+  try {
+    const filename = req.file.filename;
+    await pool.query('UPDATE users SET profile_picture = ? WHERE id = ?', [
+      filename,
+      req.user.id,
+    ]);
+
+    const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    const user = rows[0];
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Return a fresh access token reflecting the updated profile picture.
+    const token = generateAccessToken(user);
+
+    return res.json({ token, user: publicUser(user) });
+  } catch (err) {
+    console.error('updateProfilePicture error:', err.message);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
+/**
+ * POST /api/auth/logout
+ * Revokes the supplied refresh token so it can no longer be used to obtain
+ * new access tokens. The client should also discard its local tokens.
+ */
+async function logout(req, res) {
+  try {
+    const { refreshToken } = req.body;
+
+    if (refreshToken) {
+      const tokenHash = hashToken(refreshToken);
+      await pool.query(
+        `UPDATE refresh_tokens
+         SET revoked = 1, revoked_at = NOW()
+         WHERE token_hash = ? AND user_id = ?`,
+        [tokenHash, req.user.id]
+      );
+    }
+
+    return res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('logout error:', error);
+    return res.status(500).json({ message: 'Logout failed' });
+  }
+}
+
+/**
+ * POST /api/auth/refresh
+ * Validates the refresh token and issues a new access token.
+ * No auth middleware — the refresh token IS the credential here.
+ */
+async function refreshAccessToken(req, res) {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(401).json({
+        message: 'Refresh token required',
+        code: 'NO_REFRESH_TOKEN',
+      });
+    }
+
+    const tokenHash = hashToken(refreshToken);
+
+    // Join with users so we can build the new access token payload without a
+    // second query.
+    const [tokens] = await pool.query(
+      `SELECT rt.*, u.id AS uid, u.name, u.email, u.role,
+              u.district, u.is_approved
+       FROM refresh_tokens rt
+       JOIN users u ON rt.user_id = u.id
+       WHERE rt.token_hash = ?`,
+      [tokenHash]
+    );
+
+    if (tokens.length === 0) {
+      return res.status(401).json({
+        message: 'Invalid refresh token',
+        code: 'INVALID_REFRESH_TOKEN',
+      });
+    }
+
+    const tokenRecord = tokens[0];
+
+    if (tokenRecord.revoked) {
+      return res.status(401).json({
+        message: 'Refresh token has been revoked',
+        code: 'TOKEN_REVOKED',
+      });
+    }
+
+    if (new Date(tokenRecord.expires_at) < new Date()) {
+      return res.status(401).json({
+        message: 'Refresh token expired, please login again',
+        code: 'REFRESH_TOKEN_EXPIRED',
+      });
+    }
+
+    const newAccessToken = generateAccessToken({
+      id: tokenRecord.uid,
+      email: tokenRecord.email,
+      role: tokenRecord.role,
+      name: tokenRecord.name,
+      district: tokenRecord.district,
+      is_approved: tokenRecord.is_approved,
+    });
+
+    // Revoke the old refresh token (rotation — stolen tokens can only be used once)
+    await pool.query(
+      `UPDATE refresh_tokens
+       SET revoked = 1, revoked_at = NOW()
+       WHERE token_hash = ?`,
+      [tokenHash]
+    );
+
+    // Generate new refresh token (rotation)
+    const newRefreshToken = generateRefreshToken();
+    const newTokenHash = hashToken(newRefreshToken);
+    const newExpiresAt = getRefreshTokenExpiry();
+
+    // Store new refresh token
+    await pool.query(
+      `INSERT INTO refresh_tokens
+       (user_id, token_hash, expires_at, device_info)
+       VALUES (?, ?, ?, ?)`,
+      [tokenRecord.uid, newTokenHash, newExpiresAt, tokenRecord.device_info]
+    );
+
+    return res.json({
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,  // send new refresh token to client
+      expiresIn: getAccessTokenExpiresInSeconds(),
+    });
+  } catch (error) {
+    console.error('refreshAccessToken error:', error);
+    return res.status(500).json({ message: 'Token refresh failed' });
+  }
+}
+
+/**
+ * POST /api/auth/logout-all
+ * Revokes ALL active refresh tokens for the authenticated user.
+ * Use this to log out from every device simultaneously.
+ */
+async function logoutAll(req, res) {
+  try {
+    // Revoke ALL refresh tokens for this user
+    await pool.query(
+      `UPDATE refresh_tokens
+       SET revoked = 1, revoked_at = NOW()
+       WHERE user_id = ? AND revoked = 0`,
+      [req.user.id]
+    );
+
+    return res.json({
+      message: 'Logged out from all devices successfully'
+    });
+  } catch (error) {
+    console.error('Logout all error:', error);
+    return res.status(500).json({ message: 'Failed to logout from all devices' });
+  }
+}
+
+/**
+ * GET /api/auth/sessions
+ * Returns a list of active sessions (non-revoked, non-expired refresh tokens)
+ * for the authenticated user — lets them see where they are logged in from.
+ */
+async function getActiveSessions(req, res) {
+  try {
+    const [sessions] = await pool.query(
+      `SELECT id, device_info, created_at, expires_at
+       FROM refresh_tokens
+       WHERE user_id = ?
+         AND revoked = 0
+         AND expires_at > NOW()
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+
+    return res.json({ sessions });
+  } catch (error) {
+    console.error('Get sessions error:', error);
+    return res.status(500).json({ message: 'Failed to get sessions' });
+  }
+}
+
+module.exports = { register, login, getMe, updateProfile, updateProfilePicture, logout, refreshAccessToken, logoutAll, getActiveSessions };

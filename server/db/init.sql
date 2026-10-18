@@ -1,0 +1,173 @@
+-- AgriSL database schema
+-- Run against a MySQL server. Creates the database and all tables.
+
+CREATE DATABASE IF NOT EXISTS agrisl
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE agrisl;
+
+-- Users (farmers, officers, admins)
+CREATE TABLE IF NOT EXISTS users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(100) NOT NULL,
+  email VARCHAR(150) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role ENUM('farmer', 'officer', 'admin') NOT NULL DEFAULT 'farmer',
+  district VARCHAR(100),
+  phone VARCHAR(20) NULL COMMENT 'Contact phone number',
+  profile_photo VARCHAR(255) NULL COMMENT 'Profile photo filename or URL',
+  preferred_language ENUM('en', 'si') DEFAULT 'en' COMMENT 'Default language preference EN or SI',
+  gov_service_id VARCHAR(100) NULL,
+  -- Officer certification details (collected at officer sign-up; NULL for farmers/admins).
+  designation VARCHAR(150) NULL,           -- e.g. "Agricultural Instructor", "Field Officer"
+  province VARCHAR(100) NULL,              -- province the officer works in
+  cert_document_path VARCHAR(255) NULL,    -- uploaded certification file (in uploads/certifications/)
+  rejection_reason TEXT NULL,             -- admin-supplied reason when an officer is rejected
+  deactivation_reason TEXT NULL,          -- admin-supplied reason when an account is deactivated
+  profile_picture VARCHAR(255) NULL,      -- User profile picture path
+  -- Officer approval state (TINYINT used as a tri-state):
+  --   0 = pending  (default for officers; signup logic sets this)
+  --   1 = approved (default for farmers; admin-set for officers)
+  --   2 = rejected (admin can reject with rejection_reason)
+  -- Column default is 1; the signup logic sets 0 for officers.
+  is_approved TINYINT NOT NULL DEFAULT 1,
+  -- Account active flag: 1 = can log in, 0 = deactivated by admin (login blocked).
+  is_active TINYINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- AI chat sessions
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  crop_type VARCHAR(100),
+  district VARCHAR(100),
+  language ENUM('en', 'si') NOT NULL DEFAULT 'en',
+  status ENUM('active', 'completed') NOT NULL DEFAULT 'active',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_chat_sessions_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Individual messages within a chat session
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  session_id INT NOT NULL,
+  role ENUM('user', 'assistant') NOT NULL,
+  content TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_chat_messages_session FOREIGN KEY (session_id)
+    REFERENCES chat_sessions(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Crop disease detection reports
+CREATE TABLE IF NOT EXISTS disease_reports (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  crop_type VARCHAR(100),
+  district VARCHAR(100),
+  image_path VARCHAR(255),
+  -- PlantNet species identification, e.g. "Coconut palm (Cocos nucifera) — 56% match"
+  identified_species VARCHAR(255),
+  disease_name VARCHAR(200),
+  confidence_level VARCHAR(50),
+  symptoms TEXT,
+  treatment_en TEXT,
+  treatment_si TEXT,
+  full_result TEXT NULL COMMENT 'Complete structured AI diagnosis JSON',
+  -- Custom ML model output (TensorFlow.js MobileNetV2 / Python microservice).
+  -- Null when the ML model was not used or did not produce a prediction.
+  ml_prediction VARCHAR(200) NULL COMMENT 'Disease class predicted by custom ML model',
+  ml_confidence DECIMAL(5,2) NULL COMMENT 'ML model confidence score as percentage',
+  ml_class_index INT NULL COMMENT 'Numeric class index from ML model output',
+  shared_with_officer TINYINT NOT NULL DEFAULT 0,
+  officer_id INT NULL,
+  status ENUM('pending', 'reviewed') NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_disease_reports_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_disease_reports_officer FOREIGN KEY (officer_id)
+    REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Advisory articles authored by officers
+CREATE TABLE IF NOT EXISTS advisory_articles (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  officer_id INT NOT NULL,
+  title_en VARCHAR(255),
+  title_si VARCHAR(255),
+  content_en LONGTEXT,
+  content_si LONGTEXT,
+  category ENUM(
+    'crop_management',
+    'pest_control',
+    'seasonal_planting',
+    'disease_treatment',
+    'market_advice',
+    'general'
+  ) NOT NULL DEFAULT 'general',
+  tags VARCHAR(255),
+  status ENUM('draft', 'published', 'archived') NOT NULL DEFAULT 'draft',
+  views INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_advisory_articles_officer FOREIGN KEY (officer_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Article ratings (one rating per user per article)
+CREATE TABLE IF NOT EXISTS article_ratings (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  article_id INT NOT NULL,
+  user_id INT NOT NULL,
+  rating TINYINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_article_ratings_article FOREIGN KEY (article_id)
+    REFERENCES advisory_articles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_article_ratings_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_article_user (article_id, user_id)
+) ENGINE=InnoDB;
+
+-- User notifications
+CREATE TABLE IF NOT EXISTS notifications (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  type VARCHAR(100),
+  message TEXT,
+  is_read TINYINT NOT NULL DEFAULT 0,
+  related_id INT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_notifications_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Article bookmarks (one bookmark per user per article)
+CREATE TABLE IF NOT EXISTS bookmarks (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  article_id INT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_bookmarks_user FOREIGN KEY (user_id)
+    REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_bookmarks_article FOREIGN KEY (article_id)
+    REFERENCES advisory_articles(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_user_article (user_id, article_id)
+) ENGINE=InnoDB;
+
+-- Refresh tokens for JWT access/refresh token system
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  token_hash VARCHAR(255) NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  revoked TINYINT DEFAULT 0,
+  revoked_at TIMESTAMP NULL,
+  device_info VARCHAR(255) NULL COMMENT 'Browser/device info for security',
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_token_hash (token_hash),
+  INDEX idx_user_id (user_id),
+  INDEX idx_expires_at (expires_at)
+) ENGINE=InnoDB;

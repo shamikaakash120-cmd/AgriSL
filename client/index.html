@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+Sinhala:wght@400;500;700&family=Roboto:wght@300;400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <title>AgriSL</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- TensorFlow.js + MobileNetV2 for Stage 1 in-browser crop disease pre-classification.
+         Loaded as classic (non-module) scripts so they expose window.tf and window.mobilenet
+         globals that useTFClassifier.js can access without going through the Vite bundler.
+         The model weights (~17 MB) are cached by the browser after the first load. -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
