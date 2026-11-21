@@ -39,6 +39,8 @@ model/weights/
 model/checkpoints/
 *.h5
 *.keras
+!model/disease_model.keras
+!model/ood_stats.npz
 *.pt
 *.pth
 *.onnx

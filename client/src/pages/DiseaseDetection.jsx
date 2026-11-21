@@ -305,11 +305,17 @@ export default function DiseaseDetection() {
             </Stack>
 
             <DiseaseResultCard
-              aiResult={result.ai_result || result}
+              aiResult={{
+                ...(result.ai_result || result),
+                crop_mismatch: Boolean(result.crop_mismatch || result.ai_result?.crop_mismatch),
+                selected_crop: result.selected_crop || result.ai_result?.selected_crop || cropType,
+                detected_crop: result.detected_crop || result.ai_result?.detected_crop,
+                detected_crop_si: result.detected_crop_si || result.ai_result?.detected_crop_si,
+              }}
               mlResult={
                 result.ml_result ||
                 (result.ml_label
-                  ? { className: result.ml_label, confidence: result.ml_confidence }
+                  ? { className: result.ml_label, confidence: result.ml_confidence, crop_mismatch: result.crop_mismatch }
                   : null)
               }
               imageUrl={result.image_url}

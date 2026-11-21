@@ -18,6 +18,7 @@ uploads/
 *.bin
 *.h5
 *.keras
+!ml-service/model/disease_model.keras
 *.tflite
 *.pt
 *.pth
@@ -29,6 +30,7 @@ uploads/
 model.json
 class_names.json
 !ml-service/model/class_names.json
+!ml-service/model/ood_stats.npz
 models/
 checkpoints/
 

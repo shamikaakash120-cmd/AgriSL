@@ -116,6 +116,106 @@ export default function DiseaseResultCard({
 
   if (!aiResult) return null;
 
+  // ========================================================
+  // UNSUPPORTED PLANT CARD (e.g. Mango, Papaya, Coconut)
+  // Displayed when the leaf does not belong to any of the 7 supported crops.
+  // No diagnosis, no chemical treatment.
+  // ========================================================
+  if (aiResult.status === 'unsupported_crop' || aiResult.is_supported_plant === false) {
+    const isSi = lang === 'si';
+    const fontStyle = isSi ? { fontFamily: BILINGUAL_FONT } : {};
+
+    return (
+      <Card elevation={3} sx={{ borderRadius: 2, overflow: 'hidden' }}>
+        {imageUrl && (
+          <CardMedia
+            component="img"
+            image={imageUrl}
+            alt="Uploaded leaf"
+            sx={{ maxHeight: 260, objectFit: 'cover', width: '100%' }}
+          />
+        )}
+        <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+          {/* Language toggle */}
+          <Stack direction="row" sx={{ justifyContent: 'flex-end', mb: 2 }}>
+            <ToggleButtonGroup
+              value={lang}
+              exclusive
+              onChange={(_, next) => next && setLang(next)}
+              size="small"
+            >
+              <ToggleButton value="en">English</ToggleButton>
+              <ToggleButton value="si" sx={{ fontFamily: BILINGUAL_FONT }}>සිංහල</ToggleButton>
+            </ToggleButtonGroup>
+          </Stack>
+
+          <Alert
+            severity="warning"
+            sx={{
+              p: 2.5,
+              borderRadius: 2,
+              border: '2px solid',
+              borderColor: 'warning.main',
+              bgcolor: 'warning.50',
+              ...fontStyle,
+            }}
+          >
+            <AlertTitle sx={{ fontWeight: 800, fontSize: '1.1rem', ...fontStyle }}>
+              {isSi ? '⚠️ සහාය නොදක්වන බෝගයකි (Unsupported Plant)' : '⚠️ Unsupported Plant Foliage'}
+            </AlertTitle>
+            <Typography variant="body1" sx={{ ...fontStyle, fontWeight: 500, mb: 1.5 }}>
+              {isSi
+                ? (aiResult.message_si || 'මෙම පත්‍රය සහාය දක්වන ප්‍රධාන බෝග 7 න් (කෙසෙල්, මිරිස්, බඩඉරිඟු, අර්තාපල්, වී, තේ, තක්කාලි) කිසිවකට අයත් නොවන බව පෙනේ.')
+                : (aiResult.message_en || 'This leaf does not appear to belong to any of the 7 supported crops (Banana, Chilli / Bell Pepper, Corn / Maize, Potato, Rice, Tea, Tomato).')}
+            </Typography>
+            <Divider sx={{ my: 1.5 }} />
+            <Typography variant="body2" sx={{ ...fontStyle, fontWeight: 700, mb: 1 }}>
+              {isSi ? 'සහාය දක්වන බෝග ලැයිස්තුව:' : 'Currently Supported Crops (35 Disease Classes):'}
+            </Typography>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+              {[
+                { en: 'Banana', si: 'කෙසෙල්' },
+                { en: 'Chilli / Bell Pepper', si: 'මිරිස්' },
+                { en: 'Corn / Maize', si: 'බඩඉරිඟු' },
+                { en: 'Potato', si: 'අර්තාපල්' },
+                { en: 'Rice', si: 'වී' },
+                { en: 'Tea', si: 'තේ' },
+                { en: 'Tomato', si: 'තක්කාලි' },
+              ].map((c) => (
+                <Chip
+                  key={c.en}
+                  label={`${c.en} (${c.si})`}
+                  color="primary"
+                  variant="outlined"
+                  size="small"
+                  sx={{ ...fontStyle, fontWeight: 500 }}
+                />
+              ))}
+            </Stack>
+            <Typography variant="caption" color="text.secondary" sx={{ ...fontStyle, display: 'block', mt: 1 }}>
+              {isSi
+                ? 'වෙනත් බෝග (අඹ, පැපොල්, පොල් ආදිය) සඳහා රසායනික ප්‍රතිකාර භාවිත නොකරන්න. නිල උපදෙස් සඳහා ප්‍රාදේශීය කෘෂිකර්ම උපදේශක (AI) හමුවන්න.'
+                : 'Do not apply chemical treatments meant for other crops. For unlisted species (e.g. mango, papaya, coconut), please consult your regional Agricultural Instructor.'}
+            </Typography>
+          </Alert>
+
+          {showActions && onReset && (
+            <Stack direction="row" sx={{ justifyContent: 'center', mt: 3 }}>
+              <Button
+                variant="contained"
+                startIcon={<RefreshIcon />}
+                onClick={onReset}
+                sx={{ fontFamily: BILINGUAL_FONT }}
+              >
+                {isSi ? 'වෙනත් පත්‍රයක් පරීක්ෂා කරන්න' : 'Scan Another Leaf'}
+              </Button>
+            </Stack>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
   // Normalize data with fallback for legacy formats
   const isHealthy =
     aiResult.disease_name_en === 'No disease detected' ||
@@ -216,8 +316,8 @@ export default function DiseaseResultCard({
     (typeof aiResult.recovery_chance === 'string'
       ? aiResult.recovery_chance
       : lang === 'en'
-      ? aiResult.recovery_chance?.en || (isHealthy ? 'Plant is in good health.' : 'Good recovery chance if treated early.')
-      : aiResult.recovery_chance?.si || (isHealthy ? 'ශාකය හොඳ සෞඛ්‍ය තත්ත්වයක පවතී.' : 'කාලෝචිත ලෙස ප්‍රතිකාර කළහොත් සුව වීමේ ඉහළ සම්භාවිතාවක් ඇත.'));
+        ? aiResult.recovery_chance?.en || (isHealthy ? 'Plant is in good health.' : 'Good recovery chance if treated early.')
+        : aiResult.recovery_chance?.si || (isHealthy ? 'ශාකය හොඳ සෞඛ්‍ය තත්ත්වයක පවතී.' : 'කාලෝචිත ලෙස ප්‍රතිකාර කළහොත් සුව වීමේ ඉහළ සම්භාවිතාවක් ඇත.'));
 
   // When to call officer
   const callOfficerText =
@@ -248,6 +348,45 @@ export default function DiseaseResultCard({
       )}
 
       <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+        {/* ========================================================
+            CROP MISMATCH / UNVERIFIED BANNER
+            ======================================================== */}
+        {aiResult.crop_mismatch && (
+          <Alert
+            severity="warning"
+            sx={{
+              mb: 2.5,
+              borderRadius: 2,
+              border: '2px solid',
+              borderColor: 'warning.main',
+              bgcolor: 'warning.50',
+              ...fontStyle,
+            }}
+          >
+            <AlertTitle sx={{ fontWeight: 800, fontSize: '1rem', ...fontStyle }}>
+              {isSi
+                ? '⚠️ බෝග නොගැලපීමක් හඳුනාගැනිණි (Crop Mismatch)'
+                : '⚠️ Crop Mismatch Detected'}
+            </AlertTitle>
+            <Typography variant="body2" sx={{ ...fontStyle, fontWeight: 600, mb: 0.5 }}>
+              {isSi
+                ? `ඔබ ${aiResult.selected_crop || ''} තෝරා ඇතත්, ඡායාරූපය ${aiResult.detected_crop_si || aiResult.detected_crop || ''} ලෙස පෙනේ. පහත ප්‍රතිඵලය ${aiResult.detected_crop_si || aiResult.detected_crop || ''} සඳහා වේ. ${aiResult.selected_crop || ''} සඳහා වන ප්‍රතිකාර නොයොදන්න.`
+                : `You selected ${aiResult.selected_crop || ''}, but the photo looks like ${aiResult.detected_crop || ''}. The result below is for ${aiResult.detected_crop || ''}. Do NOT apply treatments meant for ${aiResult.selected_crop || ''}.`}
+            </Typography>
+          </Alert>
+        )}
+
+        {/* Soft advisory notice if botanical pattern check conflicted */}
+        {aiResult.plant_check === 'conflict' && !aiResult.crop_mismatch && (
+          <Alert severity="info" sx={{ mb: 2, borderRadius: 2, ...fontStyle }}>
+            <Typography variant="caption" sx={{ ...fontStyle }}>
+              {isSi
+                ? `සටහන: උඩුගත කළ පත්‍රයේ රටාව සාමාන්‍ය ශාක රටාවන්ගෙන් මදක් වෙනස් බව පෙනේ. පහත දැක්වෙන්නේ ආසන්නතම හඳුනාගැනීමයි.`
+                : `Note: Leaf pattern shows minor divergence from standard crop foliage. Diagnosis is shown based on trained visual features.`}
+            </Typography>
+          </Alert>
+        )}
+
         {/* ========================================================
             SECTION 1 — Disease Header
             ======================================================== */}
@@ -313,8 +452,9 @@ export default function DiseaseResultCard({
             )}
             {mlResult?.className && (
               <Chip
-                label={`ML: ${mlResult.className}${mlResult.confidence != null ? ` (${mlResult.confidence}%)` : ''}`}
-                variant="outlined"
+                label={`${mlResult.crop_mismatch ? '⚠️ ' : ''}ML: ${mlResult.className}${mlResult.confidence != null ? ` (${mlResult.confidence}%)` : ''}`}
+                color={mlResult.crop_mismatch ? 'warning' : 'default'}
+                variant={mlResult.crop_mismatch ? 'filled' : 'outlined'}
                 size="small"
                 sx={{ fontFamily: BILINGUAL_FONT }}
               />
@@ -589,14 +729,14 @@ export default function DiseaseResultCard({
               recoveryLevel === 'Good'
                 ? '#f1f8e9'
                 : recoveryLevel === 'Fair'
-                ? '#fffde7'
-                : '#ffebee',
+                  ? '#fffde7'
+                  : '#ffebee',
             borderColor:
               recoveryLevel === 'Good'
                 ? '#c8e6c9'
                 : recoveryLevel === 'Fair'
-                ? '#fff59d'
-                : '#ffcdd2',
+                  ? '#fff59d'
+                  : '#ffcdd2',
           }}
         >
           <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
